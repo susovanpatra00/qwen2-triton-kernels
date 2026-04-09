@@ -13,6 +13,7 @@ def load_model(patched: bool = True):
         model, tokenizer
     """
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    tokenizer.padding_side = "left"
 
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
