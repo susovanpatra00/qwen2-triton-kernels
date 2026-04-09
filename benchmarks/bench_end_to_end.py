@@ -1,8 +1,21 @@
 import torch
 import time
+import argparse
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--model",
+    default="Qwen/Qwen2.5-0.5B-Instruct",
+    help="HuggingFace model ID"
+)
+parser.add_argument(
+    "--batch", type=int, default=8,
+    help="Batch size"
+)
+args = parser.parse_args()
+MODEL_ID = args.model
+BATCH_SIZE = args.batch
 MAX_NEW_TOKENS = 100
 PROMPTS = [
     "Explain how the attention mechanism works in transformers.",
@@ -16,9 +29,10 @@ PROMPTS = [
 ]
 
 
-def measure_throughput(model, tokenizer, runs: int = 3) -> float:
+def measure_throughput(model, tokenizer, batch_size: int = 8, runs: int = 3) -> float:
+    prompts = (PROMPTS * ((batch_size // len(PROMPTS)) + 1))[:batch_size]
     inputs = tokenizer(
-        PROMPTS,
+        prompts,
         return_tensors="pt",
         padding=True,
         truncation=True,
@@ -50,11 +64,11 @@ def measure_throughput(model, tokenizer, runs: int = 3) -> float:
     return total_tokens / total_time
 
 
-def load_baseline():
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+def load_baseline(model_id):
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
     tokenizer.padding_side = "left"
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        model_id,
         dtype=torch.bfloat16,
         device_map="auto",
         attn_implementation="sdpa",
@@ -62,30 +76,38 @@ def load_baseline():
     return model, tokenizer
 
 
-def load_patched():
-    from model import load_model
-    return load_model(patched=True)
-
+def load_patched(model_id):
+    from model.patch import apply_triton_kernels
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer.padding_side = "left"
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        dtype=torch.bfloat16,
+        device_map="auto",
+        attn_implementation="sdpa",
+    )
+    apply_triton_kernels(model)
+    return model, tokenizer
 
 def main():
     print(f"\n{'='*55}")
-    print("End-to-End Throughput: Triton vs Baseline")
+    print(f"End-to-End Throughput: Triton vs Baseline")
     print(f"Model : {MODEL_ID}")
-    print(f"Prompt: {MAX_NEW_TOKENS} new tokens, averaged over 3 runs")
+    print(f"Batch : {BATCH_SIZE}")
+    print(f"Tokens: {MAX_NEW_TOKENS} new tokens, averaged over 3 runs")
     print(f"{'='*55}\n")
 
-    print("[ 1/2 ] Loading BASELINE model (no Triton patches)...")
-    model_base, tokenizer = load_baseline()
-    throughput_base = measure_throughput(model_base, tokenizer)
+    print("[ 1/2 ] Loading BASELINE model...")
+    model_base, tokenizer = load_baseline(MODEL_ID)
+    throughput_base = measure_throughput(model_base, tokenizer, BATCH_SIZE)
     print(f"        Baseline  : {throughput_base:.1f} tokens/sec")
 
-    # free GPU memory before loading patched model
     del model_base
     torch.cuda.empty_cache()
 
-    print("\n[ 2/2 ] Loading PATCHED model (Triton kernels)...")
-    model_patched, tokenizer = load_patched()
-    throughput_patched = measure_throughput(model_patched, tokenizer)
+    print("\n[ 2/2 ] Loading PATCHED model...")
+    model_patched, tokenizer = load_patched(MODEL_ID)
+    throughput_patched = measure_throughput(model_patched, tokenizer, BATCH_SIZE)
     print(f"        Patched   : {throughput_patched:.1f} tokens/sec")
 
     speedup = throughput_patched / throughput_base
